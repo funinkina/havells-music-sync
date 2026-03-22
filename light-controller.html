@@ -518,15 +518,12 @@
             data-mode="white">White</button>
           <button class="btn-mode" onclick="setMode('colour')"
             data-mode="colour">Colour</button>
-          <button class="btn-mode" onclick="setMode('scene')"
-            data-mode="scene">Scene</button>
-          <button class="btn-mode" onclick="setMode('music')"
-            data-mode="music">Music</button>
         </div>
 
         <!-- Color swatches -->
-        <div class="section-label">Presets</div>
-        <div class="swatches" id="swatches"></div>
+        <div class="section-label" id="swatches-label"
+          style="display:none">Presets</div>
+        <div class="swatches" id="swatches" style="display:none"></div>
 
         <!-- Sliders -->
         <div class="slider-group">
@@ -546,6 +543,14 @@
             <input type="range" id="sat-slider" min="0" max="1000" value="800"
               oninput="updatePreview()">
           </div>
+          <div class="slider-row" id="temp-row">
+            <div class="slider-header">
+              <span class="slider-name">Temperature</span>
+              <span class="slider-value" id="temp-val">500</span>
+            </div>
+            <input type="range" id="temp-slider" min="0" max="1000" value="500"
+              oninput="updatePreview()">
+          </div>
           <div class="slider-row">
             <div class="slider-header">
               <span class="slider-name">Brightness</span>
@@ -556,9 +561,8 @@
           </div>
         </div>
 
-        <button class="btn-apply" onclick="applyColor()">Apply</button>
-        <button class="btn-apply" onclick="applyWhite()"
-          style="color:var(--muted)">White · Warm</button>
+        <button class="btn-apply" onclick="applySettings()">Apply
+          Settings</button>
 
       </div>
 
@@ -575,7 +579,7 @@
 const state = {
   connected: false,
   on: false,
-  mode: 'colour',
+  mode: 'white',
   h: 180, s: 800, v: 1000
 }
 
@@ -606,7 +610,7 @@ function buildSwatches() {
       document.getElementById('bright-slider').value = p.v
       state.h = p.h; state.s = p.s; state.v = p.v
       updatePreview()
-      applyColor()
+      applySettings()
     }
     el.appendChild(div)
   })
@@ -686,31 +690,37 @@ async function setMode(mode) {
   document.querySelectorAll('.btn-mode').forEach(b => {
     b.classList.toggle('active', b.dataset.mode === mode)
   })
-  // show/hide hue+sat for white mode
-  const isColour = mode === 'colour' || mode === 'scene' || mode === 'music'
-  document.getElementById('hue-row').style.opacity = isColour ? '1' : '0.3'
-  document.getElementById('sat-row').style.opacity = isColour ? '1' : '0.3'
+  
+  const isColour = mode === 'colour'
+  document.getElementById('hue-row').style.display = isColour ? 'flex' : 'none'
+  document.getElementById('sat-row').style.display = isColour ? 'flex' : 'none'
+  document.getElementById('swatches').style.display = isColour ? 'grid' : 'none'
+  document.getElementById('swatches-label').style.display = isColour ? 'block' : 'none'
+  
+  const isWhite = mode === 'white'
+  document.getElementById('temp-row').style.display = isWhite ? 'flex' : 'none'
+
   await sendCmd({ action: 'mode', mode })
 }
 
-async function applyColor() {
-  const h = parseInt(document.getElementById('hue-slider').value)
-  const s = parseInt(document.getElementById('sat-slider').value)
+async function applySettings() {
   const v = parseInt(document.getElementById('bright-slider').value)
-  state.h = h; state.s = s; state.v = v
-
-  // ensure colour mode
-  if (state.mode !== 'colour') await setMode('colour')
-
-  updateBulbDot(h, s, v)
-  await sendCmd({ action: 'colour', h, s, v })
-}
-
-async function applyWhite() {
-  const v = parseInt(document.getElementById('bright-slider').value)
-  await setMode('white')
-  await sendCmd({ action: 'white', brightness: v, temp: 200 })
-  document.getElementById('bulb-dot').style.setProperty('--bulb-color', '#ffe8c0')
+  
+  if (state.mode === 'colour') {
+    const h = parseInt(document.getElementById('hue-slider').value)
+    const s = parseInt(document.getElementById('sat-slider').value)
+    state.h = h; state.s = s; state.v = v;
+    updateBulbDot(h, s, v)
+    await sendCmd({ action: 'colour', h, s, v })
+  } else {
+    const t = parseInt(document.getElementById('temp-slider').value)
+    state.v = v;
+    await sendCmd({ action: 'white', brightness: v, temp: t })
+    const hex = t < 300 ? '#ffcc88' : t > 700 ? '#e0f0ff' : '#ffe8c0';
+    document.documentElement.style.setProperty('--bulb-color', hex)
+    const dot = document.getElementById('bulb-dot')
+    dot.style.background = hex
+  }
 }
 
 // ── Preview ────────────────────────────────────────────────────────────────
@@ -718,11 +728,16 @@ function updatePreview() {
   const h = parseInt(document.getElementById('hue-slider').value)
   const s = parseInt(document.getElementById('sat-slider').value)
   const v = parseInt(document.getElementById('bright-slider').value)
+  const t = parseInt(document.getElementById('temp-slider').value)
   document.getElementById('hue-val').textContent = h + '°'
   document.getElementById('sat-val').textContent = s
   document.getElementById('bright-val').textContent = v
-  updateBulbDot(h, s, v)
-  document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'))
+  document.getElementById('temp-val').textContent = t
+  
+  if (state.mode === 'colour') {
+    updateBulbDot(h, s, v)
+  }
+  document.querySelectorAll('.swatch').forEach(sw => sw.classList.remove('active'))
 }
 
 function updateBulbDot(h, s, v) {

@@ -453,7 +453,9 @@ def start_track_bridge_server(track_queue: Queue):
     server = ThreadingHTTPServer((BRIDGE_HOST, BRIDGE_PORT), BridgeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    log("INFO", f"YT Music bridge listening at http://{BRIDGE_HOST}:{BRIDGE_PORT}/track")
+    log(
+        "INFO", f"YT Music bridge listening at http://{BRIDGE_HOST}:{BRIDGE_PORT}/track"
+    )
     return server
 
 
@@ -513,34 +515,44 @@ def _pixel_to_rgb(pixel: object) -> tuple[int, int, int]:
 
 
 def pick_dominant_rgb(image_data: bytes) -> tuple[int, int, int]:
-    image = Image.open(io.BytesIO(image_data)).convert("RGB")
-    image.thumbnail((160, 160))
-    quantized = image.quantize(colors=12, method=Image.Quantize.MEDIANCUT)
-    palette = quantized.getpalette()
-    color_counts = sorted(quantized.getcolors() or [], reverse=True)
+    img = Image.open(io.BytesIO(image_data)).convert("RGB")
 
-    if not palette:
-        return _pixel_to_rgb(image.resize((1, 1)).getpixel((0, 0)))
+    # Resize to speed up processing — 100px is plenty
+    img = img.resize((100, 100), Image.LANCZOS)
+    pixels = list(img.getdata())
 
-    for count, palette_index_raw in color_counts:
-        palette_index = (
-            _to_int(palette_index_raw[0])
-            if isinstance(palette_index_raw, tuple) and palette_index_raw
-            else _to_int(palette_index_raw)
-        )
-        base = palette_index * 3
-        if base + 2 >= len(palette):
-            continue
-        r = _to_int(palette[base])
-        g = _to_int(palette[base + 1])
-        b = _to_int(palette[base + 2])
-        if count <= 0:
-            continue
-        if max(r, g, b) < IGNORE_DARK_PIXELS_BELOW:
-            continue
-        return r, g, b
+    scored = []
+    for rgb in pixels:
+        r, g, b = rgb
+        h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
 
-    return _pixel_to_rgb(image.resize((1, 1)).getpixel((0, 0)))
+        # Skip near-blacks, near-whites, and grays
+        if v < 0.15:
+            continue  # too dark
+        if v > 0.95 and s < 0.1:
+            continue  # near white
+        if s < 0.15:
+            continue  # gray / desaturated
+
+        # Score: high saturation + mid-high brightness wins
+        # Penalise extremes of brightness
+        brightness_penalty = 1 - abs(v - 0.65) * 1.2
+        score = s * max(brightness_penalty, 0.1)
+        scored.append((score, (r, g, b)))
+
+    if not scored:
+        # Fallback: return average of all pixels
+        avg = tuple(int(sum(p[i] for p in pixels) / len(pixels)) for i in range(3))
+        return avg
+
+    # Sort by score, take top 20% and average them
+    scored.sort(reverse=True)
+    top = [rgb for _, rgb in scored[: max(1, len(scored) // 5)]]
+    avg_r = int(sum(p[0] for p in top) / len(top))
+    avg_g = int(sum(p[1] for p in top) / len(top))
+    avg_b = int(sum(p[2] for p in top) / len(top))
+
+    return (avg_r, avg_g, avg_b)
 
 
 def rgb_to_tuya_hsv_hex(

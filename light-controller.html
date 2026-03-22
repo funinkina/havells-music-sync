@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HAVELLS · Light Control</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap"
+      rel="stylesheet">
+    <style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0e0e0e;
+    --surface: #171717;
+    --border: #2a2a2a;
+    --text: #e8e8e8;
+    --muted: #555;
+    --accent: #e8e8e8;
+    --dim: #333;
+    --bulb-color: #ffffff;
+    --font-mono: 'DM Mono', monospace;
+    --font-sans: 'DM Sans', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem 1rem;
+  }
+
+  .shell {
+    width: 100%;
+    max-width: 380px;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* ── Header ── */
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 2rem;
+  }
+
+  .header-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.15em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .header-device {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+
+  /* ── Bulb preview ── */
+  .bulb-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.25rem;
+    padding: 2.5rem 0;
+  }
+
+  .bulb-icon {
+    position: relative;
+    width: 64px;
+    height: 64px;
+  }
+
+  .bulb-dot {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    background: var(--bulb-color);
+    transition: background 0.4s ease, box-shadow 0.4s ease;
+    box-shadow: 0 0 0 0 transparent;
+  }
+
+  .bulb-dot.on {
+    box-shadow: 0 0 40px 8px color-mix(in srgb, var(--bulb-color) 40%, transparent);
+  }
+
+  .bulb-dot.off {
+    background: var(--dim) !important;
+    box-shadow: none !important;
+  }
+
+  .bulb-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  /* ── Status bar ── */
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    margin-bottom: 2rem;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+    transition: background 0.3s;
+  }
+
+  .status-dot.ok { background: #4caf50; }
+  .status-dot.err { background: #f44336; }
+  .status-dot.pending { background: #ff9800; animation: pulse 1s infinite; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+  .status-text {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    flex: 1;
+  }
+
+  /* ── Config section ── */
+  .section {
+    margin-bottom: 2rem;
+  }
+
+  .section-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.75rem;
+  }
+
+  .input-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .input-full { grid-column: 1 / -1; }
+
+  input[type="text"], input[type="number"] {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.6rem 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.2s;
+  }
+
+  input[type="text"]:focus, input[type="number"]:focus {
+    border-color: var(--dim);
+  }
+
+  input::placeholder { color: var(--muted); }
+
+  .btn-connect {
+    width: 100%;
+    background: var(--text);
+    color: var(--bg);
+    border: none;
+    border-radius: 3px;
+    padding: 0.7rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: opacity 0.2s;
+    margin-top: 0.5rem;
+  }
+
+  .btn-connect:hover { opacity: 0.8; }
+  .btn-connect:active { opacity: 0.6; }
+
+  /* ── Divider ── */
+  .divider {
+    height: 1px;
+    background: var(--border);
+    margin: 2rem 0;
+  }
+
+  /* ── Power toggle ── */
+  .power-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 2rem;
+  }
+
+  .power-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .toggle {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    cursor: pointer;
+  }
+
+  .toggle input { display: none; }
+
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    background: var(--dim);
+    border-radius: 12px;
+    transition: background 0.25s;
+  }
+
+  .toggle input:checked ~ .toggle-track {
+    background: var(--text);
+  }
+
+  .toggle-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 18px;
+    height: 18px;
+    background: var(--bg);
+    border-radius: 50%;
+    transition: transform 0.25s;
+  }
+
+  .toggle input:checked ~ .toggle-thumb {
+    transform: translateX(20px);
+  }
+
+  /* ── Sliders ── */
+  .slider-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .slider-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .slider-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .slider-name {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .slider-value {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text);
+    min-width: 2.5rem;
+    text-align: right;
+  }
+
+  input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 100%;
+    height: 1px;
+    background: var(--border);
+    outline: none;
+    cursor: pointer;
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--text);
+    cursor: pointer;
+    transition: transform 0.15s;
+  }
+
+  input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+  }
+
+  /* Hue slider special track */
+  #hue-slider {
+    background: linear-gradient(to right,
+      hsl(0,100%,50%), hsl(30,100%,50%), hsl(60,100%,50%),
+      hsl(90,100%,50%), hsl(120,100%,50%), hsl(150,100%,50%),
+      hsl(180,100%,50%), hsl(210,100%,50%), hsl(240,100%,50%),
+      hsl(270,100%,50%), hsl(300,100%,50%), hsl(330,100%,50%),
+      hsl(360,100%,50%));
+    height: 3px;
+    border-radius: 2px;
+  }
+
+  /* ── Mode buttons ── */
+  .mode-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    margin-bottom: 2rem;
+  }
+
+  .btn-mode {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.6rem;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .btn-mode:hover { border-color: var(--dim); color: var(--text); }
+  .btn-mode.active { border-color: var(--text); color: var(--text); background: transparent; }
+
+  /* ── Color swatches ── */
+  .swatches {
+    display: grid;
+    grid-template-columns: repeat(8, 1fr);
+    gap: 0.4rem;
+    margin-bottom: 2rem;
+  }
+
+  .swatch {
+    aspect-ratio: 1;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+
+  .swatch:hover { transform: scale(1.15); }
+  .swatch.active { border-color: var(--text); }
+
+  /* ── Apply button ── */
+  .btn-apply {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.75rem;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text);
+    cursor: pointer;
+    transition: all 0.2s;
+    margin-bottom: 0.5rem;
+  }
+
+  .btn-apply:hover { background: var(--surface); border-color: var(--dim); }
+  .btn-apply:active { opacity: 0.6; }
+
+  /* ── Log ── */
+  .log {
+    margin-top: 2rem;
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
+  }
+
+  .log-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.5rem;
+  }
+
+  .log-entries {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    max-height: 120px;
+    overflow-y: auto;
+  }
+
+  .log-entry {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    gap: 0.75rem;
+  }
+
+  .log-entry .ts { color: var(--dim); flex-shrink: 0; }
+  .log-entry.ok .msg { color: #4caf50; }
+  .log-entry.err .msg { color: #f44336; }
+  .log-entry.info .msg { color: var(--muted); }
+
+  /* ── Disabled state ── */
+  .controls { transition: opacity 0.3s; }
+  .controls.disabled { opacity: 0.3; pointer-events: none; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 2px; }
+</style>
+  </head>
+  <body>
+
+    <div class="shell">
+
+      <!-- Header -->
+      <div class="header">
+        <span class="header-title">Light Control</span>
+        <span class="header-device" id="device-name">—</span>
+      </div>
+
+      <!-- Bulb preview -->
+      <div class="bulb-preview">
+        <div class="bulb-icon">
+          <div class="bulb-dot off" id="bulb-dot"></div>
+        </div>
+        <span class="bulb-label" id="bulb-state-label">off</span>
+      </div>
+
+      <!-- Status -->
+      <div class="status-bar">
+        <div class="status-dot" id="status-dot"></div>
+        <span class="status-text" id="status-text">not connected</span>
+      </div>
+
+      <!-- Config -->
+      <div class="section" id="config-section">
+        <div class="section-label">Device</div>
+        <div class="input-row">
+          <input type="text" id="ip" placeholder="192.168.0.100"
+            value="192.168.0.100">
+          <input type="text" id="version" placeholder="3.5" value="3.5">
+        </div>
+        <div class="input-row">
+          <input type="text" id="device-id" class="input-full"
+            placeholder="Device ID" value="d76bde5d392473b313toiy"
+            style="grid-column:1/-1">
+        </div>
+        <div class="input-row">
+          <input type="text" id="local-key" class="input-full"
+            placeholder="Local Key" value="tG:LKqa>K^HCJhi?"
+            style="grid-column:1/-1">
+        </div>
+        <button class="btn-connect" onclick="connect()">Connect</button>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Controls -->
+      <div class="controls disabled" id="controls">
+
+        <!-- Power -->
+        <div class="power-row">
+          <span class="power-label">Power</span>
+          <label class="toggle">
+            <input type="checkbox" id="power-toggle"
+              onchange="setPower(this.checked)">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+
+        <!-- Mode -->
+        <div class="section-label">Mode</div>
+        <div class="mode-group">
+          <button class="btn-mode active" onclick="setMode('white')"
+            data-mode="white">White</button>
+          <button class="btn-mode" onclick="setMode('colour')"
+            data-mode="colour">Colour</button>
+          <button class="btn-mode" onclick="setMode('scene')"
+            data-mode="scene">Scene</button>
+          <button class="btn-mode" onclick="setMode('music')"
+            data-mode="music">Music</button>
+        </div>
+
+        <!-- Color swatches -->
+        <div class="section-label">Presets</div>
+        <div class="swatches" id="swatches"></div>
+
+        <!-- Sliders -->
+        <div class="slider-group">
+          <div class="slider-row" id="hue-row">
+            <div class="slider-header">
+              <span class="slider-name">Hue</span>
+              <span class="slider-value" id="hue-val">180°</span>
+            </div>
+            <input type="range" id="hue-slider" min="0" max="360" value="180"
+              oninput="updatePreview()">
+          </div>
+          <div class="slider-row" id="sat-row">
+            <div class="slider-header">
+              <span class="slider-name">Saturation</span>
+              <span class="slider-value" id="sat-val">800</span>
+            </div>
+            <input type="range" id="sat-slider" min="0" max="1000" value="800"
+              oninput="updatePreview()">
+          </div>
+          <div class="slider-row">
+            <div class="slider-header">
+              <span class="slider-name">Brightness</span>
+              <span class="slider-value" id="bright-val">1000</span>
+            </div>
+            <input type="range" id="bright-slider" min="10" max="1000"
+              value="1000" oninput="updatePreview()">
+          </div>
+        </div>
+
+        <button class="btn-apply" onclick="applyColor()">Apply</button>
+        <button class="btn-apply" onclick="applyWhite()"
+          style="color:var(--muted)">White · Warm</button>
+
+      </div>
+
+      <!-- Log -->
+      <div class="log">
+        <div class="log-label">Log</div>
+        <div class="log-entries" id="log"></div>
+      </div>
+
+    </div>
+
+    <script>
+// ── State ──────────────────────────────────────────────────────────────────
+const state = {
+  connected: false,
+  on: false,
+  mode: 'colour',
+  h: 180, s: 800, v: 1000
+}
+
+// ── Presets ────────────────────────────────────────────────────────────────
+const PRESETS = [
+  { h: 0,   s: 1000, v: 1000, hex: '#ff3333' },
+  { h: 20,  s: 1000, v: 1000, hex: '#ff6622' },
+  { h: 40,  s: 1000, v: 1000, hex: '#ffaa00' },
+  { h: 60,  s: 1000, v: 1000, hex: '#ffff00' },
+  { h: 120, s: 900,  v: 900,  hex: '#33cc44' },
+  { h: 180, s: 900,  v: 1000, hex: '#00cccc' },
+  { h: 240, s: 900,  v: 1000, hex: '#3344ff' },
+  { h: 280, s: 900,  v: 1000, hex: '#8833ff' },
+]
+
+function buildSwatches() {
+  const el = document.getElementById('swatches')
+  PRESETS.forEach((p, i) => {
+    const div = document.createElement('div')
+    div.className = 'swatch'
+    div.style.background = p.hex
+    div.title = `H:${p.h} S:${p.s} V:${p.v}`
+    div.onclick = () => {
+      document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'))
+      div.classList.add('active')
+      document.getElementById('hue-slider').value = p.h
+      document.getElementById('sat-slider').value = p.s
+      document.getElementById('bright-slider').value = p.v
+      state.h = p.h; state.s = p.s; state.v = p.v
+      updatePreview()
+      applyColor()
+    }
+    el.appendChild(div)
+  })
+}
+
+// ── Connection ─────────────────────────────────────────────────────────────
+// Since this is a standalone HTML file running in the browser, we can't
+// talk to the Tuya device directly (no local network socket access from JS).
+// This controller sends commands to a tiny local Python proxy (see below).
+// URL: http://localhost:5000/cmd
+
+const PROXY = 'http://localhost:5000/cmd'
+
+async function sendCmd(payload) {
+  setStatus('pending', 'sending…')
+  try {
+    const r = await fetch(PROXY, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+    const data = await r.json()
+    if (data.ok) {
+      setStatus('ok', data.msg || 'ok')
+      log('ok', data.msg || JSON.stringify(payload))
+    } else {
+      setStatus('err', data.msg || 'error')
+      log('err', data.msg || 'command failed')
+    }
+    return data.ok
+  } catch (e) {
+    setStatus('err', 'proxy unreachable · start proxy.py')
+    log('err', 'proxy unreachable')
+    return false
+  }
+}
+
+async function connect() {
+  const ip  = document.getElementById('ip').value.trim()
+  const key = document.getElementById('local-key').value.trim()
+  const id  = document.getElementById('device-id').value.trim()
+  const ver = parseFloat(document.getElementById('version').value) || 3.5
+
+  if (!ip || !key || !id) { log('err', 'fill in all fields'); return }
+
+  setStatus('pending', 'connecting…')
+  const ok = await sendCmd({ action: 'connect', ip, key, id, version: ver })
+  if (ok) {
+    state.connected = true
+    document.getElementById('device-name').textContent = ip
+    document.getElementById('controls').classList.remove('disabled')
+    document.getElementById('config-section').style.opacity = '0.4'
+  }
+}
+
+// ── Controls ───────────────────────────────────────────────────────────────
+async function setPower(on) {
+  state.on = on
+  const dot = document.getElementById('bulb-dot')
+  const lbl = document.getElementById('bulb-state-label')
+
+  if (on) {
+    dot.classList.remove('off')
+    dot.classList.add('on')
+    lbl.textContent = 'on'
+  } else {
+    dot.classList.add('off')
+    dot.classList.remove('on')
+    lbl.textContent = 'off'
+  }
+
+  await sendCmd({ action: 'power', on })
+}
+
+async function setMode(mode) {
+  state.mode = mode
+  document.querySelectorAll('.btn-mode').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode)
+  })
+  // show/hide hue+sat for white mode
+  const isColour = mode === 'colour' || mode === 'scene' || mode === 'music'
+  document.getElementById('hue-row').style.opacity = isColour ? '1' : '0.3'
+  document.getElementById('sat-row').style.opacity = isColour ? '1' : '0.3'
+  await sendCmd({ action: 'mode', mode })
+}
+
+async function applyColor() {
+  const h = parseInt(document.getElementById('hue-slider').value)
+  const s = parseInt(document.getElementById('sat-slider').value)
+  const v = parseInt(document.getElementById('bright-slider').value)
+  state.h = h; state.s = s; state.v = v
+
+  // ensure colour mode
+  if (state.mode !== 'colour') await setMode('colour')
+
+  updateBulbDot(h, s, v)
+  await sendCmd({ action: 'colour', h, s, v })
+}
+
+async function applyWhite() {
+  const v = parseInt(document.getElementById('bright-slider').value)
+  await setMode('white')
+  await sendCmd({ action: 'white', brightness: v, temp: 200 })
+  document.getElementById('bulb-dot').style.setProperty('--bulb-color', '#ffe8c0')
+}
+
+// ── Preview ────────────────────────────────────────────────────────────────
+function updatePreview() {
+  const h = parseInt(document.getElementById('hue-slider').value)
+  const s = parseInt(document.getElementById('sat-slider').value)
+  const v = parseInt(document.getElementById('bright-slider').value)
+  document.getElementById('hue-val').textContent = h + '°'
+  document.getElementById('sat-val').textContent = s
+  document.getElementById('bright-val').textContent = v
+  updateBulbDot(h, s, v)
+  document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'))
+}
+
+function updateBulbDot(h, s, v) {
+  const hex = hsvToHex(h, s / 1000, v / 1000)
+  document.documentElement.style.setProperty('--bulb-color', hex)
+  const dot = document.getElementById('bulb-dot')
+  dot.style.background = hex
+  if (state.on) dot.classList.add('on')
+}
+
+function hsvToHex(h, s, v) {
+  let r, g, b
+  const i = Math.floor(h / 60) % 6
+  const f = h / 60 - Math.floor(h / 60)
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s)
+  switch(i) {
+    case 0: r=v;g=t;b=p; break; case 1: r=q;g=v;b=p; break
+    case 2: r=p;g=v;b=t; break; case 3: r=p;g=q;b=v; break
+    case 4: r=t;g=p;b=v; break; case 5: r=v;g=p;b=q; break
+  }
+  return '#' + [r,g,b].map(x => Math.round(x*255).toString(16).padStart(2,'0')).join('')
+}
+
+// ── UI helpers ─────────────────────────────────────────────────────────────
+function setStatus(state, msg) {
+  const dot = document.getElementById('status-dot')
+  dot.className = 'status-dot ' + state
+  document.getElementById('status-text').textContent = msg
+}
+
+function log(type, msg) {
+  const container = document.getElementById('log')
+  const now = new Date()
+  const ts = now.getHours().toString().padStart(2,'0') + ':' +
+             now.getMinutes().toString().padStart(2,'0') + ':' +
+             now.getSeconds().toString().padStart(2,'0')
+  const entry = document.createElement('div')
+  entry.className = `log-entry ${type}`
+  entry.innerHTML = `<span class="ts">${ts}</span><span class="msg">${msg}</span>`
+  container.prepend(entry)
+  while (container.children.length > 20) container.removeChild(container.lastChild)
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+buildSwatches()
+log('info', 'start proxy.py then click connect')
+</script>
+
+    <!--
+════════════════════════════════════════════════════════
+  LOCAL PROXY  ·  save as proxy.py and run it
+════════════════════════════════════════════════════════
+
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import tinytuya, json
+
+app = Flask(__name__)
+CORS(app)
+
+bulb = None
+
+@app.route('/cmd', methods=['POST'])
+def cmd():
+    global bulb
+    data = request.json
+    action = data.get('action')
+
+    try:
+        if action == 'connect':
+            bulb = tinytuya.BulbDevice(
+                dev_id=data['id'],
+                address=data['ip'],
+                local_key=data['key'],
+                version=data['version']
+            )
+            bulb.set_socketPersistent(True)
+            return jsonify(ok=True, msg=f"connected to {data['ip']}")
+
+        if bulb is None:
+            return jsonify(ok=False, msg='not connected')
+
+        if action == 'power':
+            bulb.set_value(20, data['on'])
+            return jsonify(ok=True, msg='power ' + ('on' if data['on'] else 'off'))
+
+        if action == 'mode':
+            bulb.set_value(21, data['mode'])
+            return jsonify(ok=True, msg='mode → ' + data['mode'])
+
+        if action == 'colour':
+            h, s, v = data['h'], data['s'], data['v']
+            colour = json.dumps({"h": h, "s": s, "v": v}, separators=(',', ':'))
+            bulb.set_value(21, 'colour')
+            bulb.set_value(24, colour)
+            return jsonify(ok=True, msg=f'colour H:{h} S:{s} V:{v}')
+
+        if action == 'white':
+            bulb.set_value(21, 'white')
+            bulb.set_value(22, data.get('brightness', 1000))
+            bulb.set_value(23, data.get('temp', 500))
+            return jsonify(ok=True, msg='white mode')
+
+        return jsonify(ok=False, msg='unknown action')
+
+    except Exception as e:
+        return jsonify(ok=False, msg=str(e))
+
+if __name__ == '__main__':
+    app.run(port=5000)
+
+# pip install flask flask-cors tinytuya
+# python proxy.py
+════════════════════════════════════════════════════════
+-->
+
+  </body>
+</html>

@@ -49,6 +49,9 @@ BEAT_MAX_BRIGHTNESS = 1000
 BEAT_UPDATE_INTERVAL_SECONDS = 0.12
 BEAT_MIN_BRIGHTNESS_DELTA = 25
 
+COLOR_TRANSITION_SECONDS = 2.4
+COLOR_TRANSITION_STEPS = 24
+
 
 def log(level: str, message: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -462,6 +465,13 @@ def hsv_to_tuya_hex(h: int, s: int, v: int) -> str:
     return f"{h_i:04x}{s_i:04x}{v_i:04x}"
 
 
+def _interpolate_hue(start_h: int, end_h: int, t: float) -> int:
+    s = float(start_h) % 360.0
+    e = float(end_h) % 360.0
+    delta = ((e - s + 180.0) % 360.0) - 180.0
+    return int(round((s + delta * t) % 360.0))
+
+
 def build_bulb() -> tinytuya.BulbDevice:
     bulb = tinytuya.BulbDevice(
         dev_id=DEVICE_ID,
@@ -501,6 +511,47 @@ def set_bulb_hsv(bulb: tinytuya.BulbDevice, h: int, s: int, v: int) -> None:
     bulb.set_multiple_values(payload)
 
 
+def transition_bulb_to_album_color(
+    bulb: tinytuya.BulbDevice,
+    rgb: tuple[int, int, int],
+    current_h: int | None,
+    current_s: int | None,
+    current_v: int | None,
+) -> tuple[int, int, int]:
+    r, g, b = rgb
+    target_h, target_s, target_v, _ = rgb_to_tuya_hsv_hex(r, g, b)
+
+    if current_h is None or current_s is None or current_v is None:
+        set_bulb_hsv(bulb, target_h, target_s, target_v)
+        log(
+            "LIGHT",
+            f"RGB=({r},{g},{b}) -> H={target_h} S={target_s} V={target_v} | direct set",
+        )
+        return target_h, target_s, target_v
+
+    start_h = int(current_h)
+    start_s = int(current_s)
+    start_v = int(current_v)
+    steps = max(1, int(COLOR_TRANSITION_STEPS))
+    step_sleep = max(0.01, float(COLOR_TRANSITION_SECONDS) / steps)
+
+    log(
+        "TRANSITION",
+        f"Smooth color change H:{start_h}->{target_h} S:{start_s}->{target_s} over {COLOR_TRANSITION_SECONDS:.1f}s",
+    )
+
+    for i in range(1, steps + 1):
+        t = i / steps
+        h = _interpolate_hue(start_h, target_h, t)
+        s = int(round(start_s + (target_s - start_s) * t))
+        v = int(round(start_v + (target_v - start_v) * t))
+        set_bulb_hsv(bulb, h, s, v)
+        time.sleep(step_sleep)
+
+    log("LIGHT", f"Transition complete -> H={target_h} S={target_s} V={target_v}")
+    return target_h, target_s, target_v
+
+
 def main() -> None:
     bulb = build_bulb()
     beat_tracker = BeatEnergyTracker() if USE_BEAT_BRIGHTNESS_SYNC else None
@@ -535,6 +586,7 @@ def main() -> None:
     next_track_check = 0.0
     active_h = None
     active_s = None
+    active_v = None
     last_brightness_sent = None
     log("INFO", "Listening for currently playing track... press Ctrl+C to stop.")
 
@@ -552,6 +604,7 @@ def main() -> None:
                         last_seen_track = ""
                     active_h = None
                     active_s = None
+                    active_v = None
                 else:
                     current_track = (
                         f"{now_playing.get('title', '')} - {now_playing.get('artist', '')} "
@@ -586,10 +639,16 @@ def main() -> None:
                                 "TRACK",
                                 f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
                             )
-                            active_h, active_s, _active_v = set_bulb_to_album_color(
-                                bulb, rgb
+                            active_h, active_s, active_v = (
+                                transition_bulb_to_album_color(
+                                    bulb,
+                                    rgb,
+                                    active_h,
+                                    active_s,
+                                    active_v,
+                                )
                             )
-                            last_brightness_sent = BRIGHTNESS_FIXED
+                            last_brightness_sent = active_v
                             last_signature = sig
 
             if beat_tracker and active_h is not None and active_s is not None:
@@ -607,6 +666,7 @@ def main() -> None:
                 ):
                     set_bulb_hsv(bulb, active_h, active_s, brightness)
                     last_brightness_sent = brightness
+                    active_v = brightness
         except KeyboardInterrupt:
             log("INFO", "Stopped")
             if beat_tracker:

@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 import colorsys
 import io
+import importlib
 import json
 import shutil
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
 
 import tinytuya
 from PIL import Image
+
+try:
+    np = importlib.import_module("numpy")
+    sd = importlib.import_module("sounddevice")
+    AUDIO_IMPORT_ERROR = ""
+except Exception:
+    np = None
+    sd = None
+    AUDIO_IMPORT_ERROR = "missing numpy and/or sounddevice"
 
 
 # ==========================
@@ -28,6 +39,16 @@ BRIGHTNESS_FIXED = 900
 MIN_SATURATION = 180
 IGNORE_DARK_PIXELS_BELOW = 25
 
+USE_BEAT_BRIGHTNESS_SYNC = False
+BEAT_INPUT_DEVICE = None
+BEAT_SAMPLE_RATE = 22050
+BEAT_BLOCK_SIZE = 1024
+BEAT_GAIN = 10.0
+BEAT_BASE_BRIGHTNESS = 220
+BEAT_MAX_BRIGHTNESS = 1000
+BEAT_UPDATE_INTERVAL_SECONDS = 0.12
+BEAT_MIN_BRIGHTNESS_DELTA = 25
+
 
 def log(level: str, message: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -44,6 +65,62 @@ def run_applescript(script: str) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+class BeatEnergyTracker:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._fast = 0.0
+        self._slow = 0.0
+        self._level = 0.0
+        self._stream = None
+
+    def _callback(self, indata, _frames, _time_info, status) -> None:
+        if status:
+            return
+        if np is None:
+            return
+
+        mono = indata[:, 0].astype(np.float32)
+        energy = float(np.mean(np.abs(mono)))
+
+        with self._lock:
+            self._fast = 0.55 * self._fast + 0.45 * energy
+            self._slow = 0.97 * self._slow + 0.03 * energy
+            pulse = max(0.0, self._fast - self._slow)
+            raw = min(1.0, pulse * BEAT_GAIN)
+            self._level = 0.80 * self._level + 0.20 * raw
+
+    def start(self) -> bool:
+        if sd is None:
+            return False
+        try:
+            self._stream = sd.InputStream(
+                device=BEAT_INPUT_DEVICE,
+                channels=1,
+                samplerate=BEAT_SAMPLE_RATE,
+                blocksize=BEAT_BLOCK_SIZE,
+                callback=self._callback,
+            )
+            self._stream.start()
+            return True
+        except Exception:
+            self._stream = None
+            return False
+
+    def stop(self) -> None:
+        if self._stream is None:
+            return
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
+
+    def level(self) -> float:
+        with self._lock:
+            return max(0.0, min(1.0, self._level))
 
 
 def run_command(args: list[str]) -> str:
@@ -124,7 +201,7 @@ def _parse_yt_music_tab_title(tab_title: str) -> tuple[str, str]:
 
 
 def get_yt_music_from_browser_tabs() -> dict | None:
-    script = r'''
+    script = r"""
 on findYtMusicInChromium(appName)
     tell application "System Events"
         set appRunning to exists (processes where name is appName)
@@ -182,7 +259,7 @@ set resultLine to findYtMusicInChromium("Arc")
 if resultLine is not "" then return resultLine
 
 return findYtMusicInSafari()
-'''
+"""
 
     out = run_applescript(script)
     if not out:
@@ -207,7 +284,7 @@ return findYtMusicInSafari()
 
 
 def get_spotify_now_playing() -> dict | None:
-    script = r'''
+    script = r"""
 tell application "System Events"
     set spotifyRunning to exists (processes where name is "Spotify")
 end tell
@@ -225,7 +302,7 @@ tell application "Spotify"
     set trackArtwork to artwork url of current track
     return trackName & "|||" & trackArtist & "|||" & trackAlbum & "|||" & trackArtwork
 end tell
-'''
+"""
     out = run_applescript(script)
     if not out:
         return None
@@ -244,7 +321,7 @@ end tell
 
 
 def get_music_now_playing() -> dict | None:
-    script = r'''
+    script = r"""
 tell application "System Events"
     set musicRunning to exists (processes where name is "Music")
 end tell
@@ -261,7 +338,7 @@ tell application "Music"
     set trackAlbum to album of current track
     return trackName & "|||" & trackArtist & "|||" & trackAlbum
 end tell
-'''
+"""
     out = run_applescript(script)
     if not out:
         return None
@@ -367,13 +444,22 @@ def pick_dominant_rgb(image_data: bytes) -> tuple[int, int, int]:
     return _pixel_to_rgb(image.resize((1, 1)).getpixel((0, 0)))
 
 
-def rgb_to_tuya_hsv_hex(r: int, g: int, b: int, value_override: int = BRIGHTNESS_FIXED) -> tuple[int, int, int, str]:
+def rgb_to_tuya_hsv_hex(
+    r: int, g: int, b: int, value_override: int = BRIGHTNESS_FIXED
+) -> tuple[int, int, int, str]:
     h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
     h_i = max(0, min(360, int(round(h * 360))))
     s_i = max(MIN_SATURATION, min(1000, int(round(s * 1000))))
     v_i = max(10, min(1000, int(value_override)))
     payload = f"{h_i:04x}{s_i:04x}{v_i:04x}"
     return h_i, s_i, v_i, payload
+
+
+def hsv_to_tuya_hex(h: int, s: int, v: int) -> str:
+    h_i = max(0, min(360, int(h)))
+    s_i = max(MIN_SATURATION, min(1000, int(s)))
+    v_i = max(10, min(1000, int(v)))
+    return f"{h_i:04x}{s_i:04x}{v_i:04x}"
 
 
 def build_bulb() -> tinytuya.BulbDevice:
@@ -391,7 +477,9 @@ def build_bulb() -> tinytuya.BulbDevice:
     return bulb
 
 
-def set_bulb_to_album_color(bulb: tinytuya.BulbDevice, rgb: tuple[int, int, int]) -> None:
+def set_bulb_to_album_color(
+    bulb: tinytuya.BulbDevice, rgb: tuple[int, int, int]
+) -> tuple[int, int, int]:
     r, g, b = rgb
     h, s, v, colour_hex = rgb_to_tuya_hsv_hex(r, g, b)
     payload = {
@@ -401,70 +489,133 @@ def set_bulb_to_album_color(bulb: tinytuya.BulbDevice, rgb: tuple[int, int, int]
     }
     response = bulb.set_multiple_values(payload)
     log("LIGHT", f"RGB=({r},{g},{b}) -> H={h} S={s} V={v} | response={response}")
+    return h, s, v
+
+
+def set_bulb_hsv(bulb: tinytuya.BulbDevice, h: int, s: int, v: int) -> None:
+    payload = {
+        "20": True,
+        "21": "colour",
+        "24": hsv_to_tuya_hex(h, s, v),
+    }
+    bulb.set_multiple_values(payload)
 
 
 def main() -> None:
     bulb = build_bulb()
+    beat_tracker = BeatEnergyTracker() if USE_BEAT_BRIGHTNESS_SYNC else None
+
+    if USE_BEAT_BRIGHTNESS_SYNC:
+        if BEAT_INPUT_DEVICE is None:
+            log("INFO", "Beat input configured: default system input (mic)")
+        else:
+            log("INFO", f"Beat input configured: {BEAT_INPUT_DEVICE}")
+
+        if np is None or sd is None:
+            log(
+                "WARN",
+                f"Beat sync disabled: {AUDIO_IMPORT_ERROR}; install numpy + sounddevice",
+            )
+            beat_tracker = None
+        elif beat_tracker and beat_tracker.start():
+            if BEAT_INPUT_DEVICE is None:
+                log("INFO", "Beat input device opened: default system input (mic)")
+            else:
+                log("INFO", f"Beat input device opened: {BEAT_INPUT_DEVICE}")
+            log("INFO", "Beat sync enabled")
+        else:
+            log(
+                "WARN",
+                "Beat sync disabled: could not open audio input device",
+            )
+            beat_tracker = None
+
     last_signature = ""
     last_seen_track = ""
+    next_track_check = 0.0
+    active_h = None
+    active_s = None
+    last_brightness_sent = None
     log("INFO", "Listening for currently playing track... press Ctrl+C to stop.")
 
     while True:
         try:
-            now_playing = get_now_playing()
-            if not now_playing:
-                if last_seen_track:
-                    log("INFO", "No active song detected")
-                    last_seen_track = ""
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+            now_ts = time.time()
 
-            current_track = (
-                f"{now_playing.get('title', '')} - {now_playing.get('artist', '')} "
-                f"[{now_playing.get('source', 'Unknown')}]"
-            ).strip()
-            if current_track != last_seen_track:
-                log("DETECT", f"Detected song: {current_track}")
-                last_seen_track = current_track
+            if now_ts >= next_track_check:
+                now_playing = get_now_playing()
+                next_track_check = now_ts + POLL_INTERVAL_SECONDS
 
-            sig = "|".join(
-                [
-                    now_playing.get("source", ""),
-                    now_playing.get("title", ""),
-                    now_playing.get("artist", ""),
-                    now_playing.get("album", ""),
-                    now_playing.get("artwork_url", ""),
-                ]
-            )
-            if sig == last_signature:
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+                if not now_playing:
+                    if last_seen_track:
+                        log("INFO", "No active song detected")
+                        last_seen_track = ""
+                    active_h = None
+                    active_s = None
+                else:
+                    current_track = (
+                        f"{now_playing.get('title', '')} - {now_playing.get('artist', '')} "
+                        f"[{now_playing.get('source', 'Unknown')}]"
+                    ).strip()
+                    if current_track != last_seen_track:
+                        log("DETECT", f"Detected song: {current_track}")
+                        last_seen_track = current_track
 
-            artwork_url = now_playing.get("artwork_url", "")
-            if not artwork_url:
-                log(
-                    "SKIP",
-                    f"No artwork URL for {now_playing['title']} - {now_playing['artist']}",
+                    sig = "|".join(
+                        [
+                            now_playing.get("source", ""),
+                            now_playing.get("title", ""),
+                            now_playing.get("artist", ""),
+                            now_playing.get("album", ""),
+                            now_playing.get("artwork_url", ""),
+                        ]
+                    )
+
+                    if sig != last_signature:
+                        artwork_url = now_playing.get("artwork_url", "")
+                        if not artwork_url:
+                            log(
+                                "SKIP",
+                                f"No artwork URL for {now_playing['title']} - {now_playing['artist']}",
+                            )
+                            last_signature = sig
+                        else:
+                            image_data = download_image(artwork_url)
+                            rgb = pick_dominant_rgb(image_data)
+                            log(
+                                "TRACK",
+                                f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
+                            )
+                            active_h, active_s, _active_v = set_bulb_to_album_color(
+                                bulb, rgb
+                            )
+                            last_brightness_sent = BRIGHTNESS_FIXED
+                            last_signature = sig
+
+            if beat_tracker and active_h is not None and active_s is not None:
+                beat_level = beat_tracker.level()
+                brightness = int(
+                    BEAT_BASE_BRIGHTNESS
+                    + beat_level * (BEAT_MAX_BRIGHTNESS - BEAT_BASE_BRIGHTNESS)
                 )
-                last_signature = sig
-                time.sleep(POLL_INTERVAL_SECONDS)
-                continue
+                brightness = max(10, min(1000, brightness))
 
-            image_data = download_image(artwork_url)
-            rgb = pick_dominant_rgb(image_data)
-            log(
-                "TRACK",
-                f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
-            )
-            set_bulb_to_album_color(bulb, rgb)
-            last_signature = sig
+                if (
+                    last_brightness_sent is None
+                    or abs(brightness - last_brightness_sent)
+                    >= BEAT_MIN_BRIGHTNESS_DELTA
+                ):
+                    set_bulb_hsv(bulb, active_h, active_s, brightness)
+                    last_brightness_sent = brightness
         except KeyboardInterrupt:
             log("INFO", "Stopped")
+            if beat_tracker:
+                beat_tracker.stop()
             break
         except Exception as exc:
             log("ERROR", str(exc))
 
-        time.sleep(POLL_INTERVAL_SECONDS)
+        time.sleep(BEAT_UPDATE_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":

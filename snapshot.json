@@ -1,0 +1,37 @@
+{
+    "timestamp": 1774172765.830882,
+    "devices": [
+        {
+            "id": "d76bde5d392473b313toiy",
+            "ip": "192.168.0.101",
+            "uuid": "d9cb25a5469af856",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "key8u54q9dtru5jw",
+            "token": true,
+            "wf_cfg": true,
+            "clientLink": 3,
+            "name": "HAVELLS TW+RGB",
+            "key": "tG:LKqa>K^HCJhi?",
+            "mac": "00:33:7a:8c:a9:42",
+            "ability": 0,
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "20": true,
+                    "21": "white",
+                    "22": 1000,
+                    "23": 543,
+                    "24": "000003e803e8",
+                    "25": "000e0d0000000000000000c80000",
+                    "26": 3900,
+                    "34": false
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.5"
+        }
+    ]
+}

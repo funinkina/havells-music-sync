@@ -3,6 +3,8 @@ import colorsys
 import io
 import importlib
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from queue import Empty, Queue
 import shutil
 import subprocess
 import threading
@@ -34,6 +36,8 @@ DEVICE_VERSION = 3.5
 POLL_INTERVAL_SECONDS = 3
 ITUNES_STOREFRONT = "US"
 NOWPLAYING_CLI_BIN = "nowplaying-cli"
+BRIDGE_HOST = "127.0.0.1"
+BRIDGE_PORT = 9001
 
 BRIGHTNESS_FIXED = 900
 MIN_SATURATION = 180
@@ -49,8 +53,8 @@ BEAT_MAX_BRIGHTNESS = 1000
 BEAT_UPDATE_INTERVAL_SECONDS = 0.12
 BEAT_MIN_BRIGHTNESS_DELTA = 25
 
-COLOR_TRANSITION_SECONDS = 2.4
-COLOR_TRANSITION_STEPS = 24
+COLOR_TRANSITION_SECONDS = 3
+COLOR_TRANSITION_STEPS = 60
 
 
 def log(level: str, message: str) -> None:
@@ -387,13 +391,105 @@ def find_artwork_via_itunes(title: str, artist: str, album: str) -> str:
     return art.replace("100x100bb", "600x600bb")
 
 
-def get_now_playing() -> dict | None:
+def normalize_track_payload(payload: dict) -> dict | None:
+    title = str(payload.get("title") or "").strip()
+    if not title:
+        return None
+
+    artist = str(payload.get("artist") or "").strip()
+    album = str(payload.get("album") or "").strip()
+    source = str(payload.get("source") or "YouTube Music").strip()
+    state = str(payload.get("state") or "unknown").strip().lower()
+
+    artwork_url = str(
+        payload.get("artwork_url")
+        or payload.get("artworkURL")
+        or payload.get("artworkUrl")
+        or ""
+    ).strip()
+    if not artwork_url:
+        artwork_url = find_artwork_via_itunes(title, artist, album)
+
+    return {
+        "source": source,
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "state": state,
+        "artwork_url": artwork_url,
+    }
+
+
+def start_track_bridge_server(track_queue: Queue):
+    class BridgeHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def do_POST(self):
+            if self.path != "/track":
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            try:
+                size = int(self.headers.get("Content-Length", "0"))
+                body = self.rfile.read(size)
+                payload = json.loads(body.decode("utf-8"))
+                track = normalize_track_payload(payload)
+                if track:
+                    track_queue.put(track)
+
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except Exception as exc:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                msg = json.dumps({"ok": False, "error": str(exc)})
+                self.wfile.write(msg.encode("utf-8"))
+
+    server = ThreadingHTTPServer((BRIDGE_HOST, BRIDGE_PORT), BridgeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log("INFO", f"YT Music bridge listening at http://{BRIDGE_HOST}:{BRIDGE_PORT}/track")
+    return server
+
+
+def get_now_playing_fallback() -> dict | None:
     return (
         get_system_now_playing()
-        or get_yt_music_from_browser_tabs()
         or get_spotify_now_playing()
         or get_music_now_playing()
+        or get_yt_music_from_browser_tabs()
     )
+
+
+def fallback_poll_worker(stop_event: threading.Event, track_queue: Queue) -> None:
+    last_sig = ""
+    while not stop_event.is_set():
+        try:
+            track = get_now_playing_fallback()
+            if track:
+                sig = "|".join(
+                    [
+                        str(track.get("source", "")),
+                        str(track.get("title", "")),
+                        str(track.get("artist", "")),
+                        str(track.get("album", "")),
+                    ]
+                )
+                if sig != last_sig:
+                    track["state"] = "playing"
+                    track_queue.put(track)
+                    last_sig = sig
+            else:
+                last_sig = ""
+        except Exception as exc:
+            log("WARN", f"Fallback poll error: {exc}")
+
+        stop_event.wait(POLL_INTERVAL_SECONDS)
 
 
 def download_image(url: str) -> bytes:
@@ -552,9 +648,52 @@ def transition_bulb_to_album_color(
     return target_h, target_s, target_v
 
 
+def beat_worker(
+    stop_event: threading.Event,
+    bulb: tinytuya.BulbDevice,
+    beat_tracker: BeatEnergyTracker,
+    color_state: dict,
+    color_lock: threading.Lock,
+) -> None:
+    while not stop_event.is_set():
+        with color_lock:
+            active_h = color_state.get("h")
+            active_s = color_state.get("s")
+            last_brightness_sent = color_state.get("last_brightness")
+
+        if active_h is not None and active_s is not None:
+            beat_level = beat_tracker.level()
+            brightness = int(
+                BEAT_BASE_BRIGHTNESS
+                + beat_level * (BEAT_MAX_BRIGHTNESS - BEAT_BASE_BRIGHTNESS)
+            )
+            brightness = max(10, min(1000, brightness))
+
+            if (
+                last_brightness_sent is None
+                or abs(brightness - int(last_brightness_sent))
+                >= BEAT_MIN_BRIGHTNESS_DELTA
+            ):
+                set_bulb_hsv(bulb, int(active_h), int(active_s), brightness)
+                with color_lock:
+                    color_state["v"] = brightness
+                    color_state["last_brightness"] = brightness
+
+        stop_event.wait(BEAT_UPDATE_INTERVAL_SECONDS)
+
+
 def main() -> None:
     bulb = build_bulb()
     beat_tracker = BeatEnergyTracker() if USE_BEAT_BRIGHTNESS_SYNC else None
+    stop_event = threading.Event()
+    color_lock = threading.Lock()
+    color_state: dict[str, int | None] = {
+        "h": None,
+        "s": None,
+        "v": None,
+        "last_brightness": None,
+    }
+    beat_thread = None
 
     if USE_BEAT_BRIGHTNESS_SYNC:
         if BEAT_INPUT_DEVICE is None:
@@ -574,6 +713,12 @@ def main() -> None:
             else:
                 log("INFO", f"Beat input device opened: {BEAT_INPUT_DEVICE}")
             log("INFO", "Beat sync enabled")
+            beat_thread = threading.Thread(
+                target=beat_worker,
+                args=(stop_event, bulb, beat_tracker, color_state, color_lock),
+                daemon=True,
+            )
+            beat_thread.start()
         else:
             log(
                 "WARN",
@@ -581,101 +726,98 @@ def main() -> None:
             )
             beat_tracker = None
 
+    track_queue: Queue = Queue()
+    bridge_server = start_track_bridge_server(track_queue)
+    fallback_thread = threading.Thread(
+        target=fallback_poll_worker,
+        args=(stop_event, track_queue),
+        daemon=True,
+    )
+    fallback_thread.start()
+
     last_signature = ""
-    last_seen_track = ""
-    next_track_check = 0.0
-    active_h = None
-    active_s = None
-    active_v = None
-    last_brightness_sent = None
-    log("INFO", "Listening for currently playing track... press Ctrl+C to stop.")
+    log(
+        "INFO",
+        "Waiting for YT Music extension events + Spotify/Music fallback... press Ctrl+C to stop.",
+    )
 
-    while True:
-        try:
-            now_ts = time.time()
+    try:
+        while True:
+            try:
+                now_playing = track_queue.get(timeout=1.0)
+            except Empty:
+                continue
 
-            if now_ts >= next_track_check:
-                now_playing = get_now_playing()
-                next_track_check = now_ts + POLL_INTERVAL_SECONDS
+            state = str(now_playing.get("state") or "unknown").lower()
+            if state == "paused":
+                log("INFO", "Playback paused")
+                continue
 
-                if not now_playing:
-                    if last_seen_track:
-                        log("INFO", "No active song detected")
-                        last_seen_track = ""
-                    active_h = None
-                    active_s = None
-                    active_v = None
-                else:
-                    current_track = (
-                        f"{now_playing.get('title', '')} - {now_playing.get('artist', '')} "
-                        f"[{now_playing.get('source', 'Unknown')}]"
-                    ).strip()
-                    if current_track != last_seen_track:
-                        log("DETECT", f"Detected song: {current_track}")
-                        last_seen_track = current_track
+            sig = "|".join(
+                [
+                    now_playing.get("title", ""),
+                    now_playing.get("artist", ""),
+                    now_playing.get("album", ""),
+                ]
+            )
+            if sig == last_signature:
+                continue
 
-                    sig = "|".join(
-                        [
-                            now_playing.get("source", ""),
-                            now_playing.get("title", ""),
-                            now_playing.get("artist", ""),
-                            now_playing.get("album", ""),
-                            now_playing.get("artwork_url", ""),
-                        ]
-                    )
+            log(
+                "DETECT",
+                f"Detected song: {now_playing['title']} - {now_playing['artist']} [{now_playing['source']}]",
+            )
 
-                    if sig != last_signature:
-                        artwork_url = now_playing.get("artwork_url", "")
-                        if not artwork_url:
-                            log(
-                                "SKIP",
-                                f"No artwork URL for {now_playing['title']} - {now_playing['artist']}",
-                            )
-                            last_signature = sig
-                        else:
-                            image_data = download_image(artwork_url)
-                            rgb = pick_dominant_rgb(image_data)
-                            log(
-                                "TRACK",
-                                f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
-                            )
-                            active_h, active_s, active_v = (
-                                transition_bulb_to_album_color(
-                                    bulb,
-                                    rgb,
-                                    active_h,
-                                    active_s,
-                                    active_v,
-                                )
-                            )
-                            last_brightness_sent = active_v
-                            last_signature = sig
-
-            if beat_tracker and active_h is not None and active_s is not None:
-                beat_level = beat_tracker.level()
-                brightness = int(
-                    BEAT_BASE_BRIGHTNESS
-                    + beat_level * (BEAT_MAX_BRIGHTNESS - BEAT_BASE_BRIGHTNESS)
+            artwork_url = now_playing.get("artwork_url", "")
+            if not artwork_url:
+                log(
+                    "SKIP",
+                    f"No artwork URL for {now_playing['title']} - {now_playing['artist']}",
                 )
-                brightness = max(10, min(1000, brightness))
+                last_signature = sig
+                continue
 
-                if (
-                    last_brightness_sent is None
-                    or abs(brightness - last_brightness_sent)
-                    >= BEAT_MIN_BRIGHTNESS_DELTA
-                ):
-                    set_bulb_hsv(bulb, active_h, active_s, brightness)
-                    last_brightness_sent = brightness
-                    active_v = brightness
-        except KeyboardInterrupt:
-            log("INFO", "Stopped")
-            if beat_tracker:
-                beat_tracker.stop()
-            break
-        except Exception as exc:
-            log("ERROR", str(exc))
+            image_data = download_image(artwork_url)
+            rgb = pick_dominant_rgb(image_data)
+            log(
+                "TRACK",
+                f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
+            )
 
-        time.sleep(BEAT_UPDATE_INTERVAL_SECONDS)
+            with color_lock:
+                current_h = color_state.get("h")
+                current_s = color_state.get("s")
+                current_v = color_state.get("v")
+
+            new_h, new_s, new_v = transition_bulb_to_album_color(
+                bulb,
+                rgb,
+                int(current_h) if current_h is not None else None,
+                int(current_s) if current_s is not None else None,
+                int(current_v) if current_v is not None else None,
+            )
+
+            with color_lock:
+                color_state["h"] = new_h
+                color_state["s"] = new_s
+                color_state["v"] = new_v
+                color_state["last_brightness"] = new_v
+
+            last_signature = sig
+    except KeyboardInterrupt:
+        log("INFO", "Stopped")
+    except Exception as exc:
+        log("ERROR", str(exc))
+    finally:
+        stop_event.set()
+        if beat_thread and beat_thread.is_alive():
+            beat_thread.join(timeout=1.0)
+        if fallback_thread.is_alive():
+            fallback_thread.join(timeout=1.0)
+        if beat_tracker:
+            beat_tracker.stop()
+        bridge_server.shutdown()
+        bridge_server.server_close()
 
 
 if __name__ == "__main__":

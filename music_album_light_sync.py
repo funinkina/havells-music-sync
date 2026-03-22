@@ -54,8 +54,8 @@ BEAT_MAX_BRIGHTNESS = 1000
 BEAT_UPDATE_INTERVAL_SECONDS = 0.12
 BEAT_MIN_BRIGHTNESS_DELTA = 25
 
-COLOR_TRANSITION_SECONDS = 3
-COLOR_TRANSITION_STEPS = 60
+COLOR_TRANSITION_SECONDS = 2
+COLOR_TRANSITION_STEPS = 10
 
 
 def log(level: str, message: str) -> None:
@@ -577,7 +577,7 @@ def _to_int(value: object, default: int = 0) -> int:
 
 
 def _pixel_to_rgb(pixel: object) -> tuple[int, int, int]:
-    if isinstance(pixel, tuple) and len(pixel) >= 3:
+    if isinstance(pixel, (tuple, list)) and len(pixel) >= 3:
         return _to_int(pixel[0]), _to_int(pixel[1]), _to_int(pixel[2])
     if isinstance(pixel, (int, float)):
         v = int(pixel)
@@ -590,7 +590,21 @@ def pick_dominant_rgb(image_data: bytes) -> tuple[int, int, int]:
 
     # Resize to speed up processing — 100px is plenty
     img = img.resize((100, 100), Image.LANCZOS)
-    pixels = list(img.getdata())
+    if hasattr(img, "get_flattened_data"):
+        flat = list(img.get_flattened_data())
+        if flat and isinstance(flat[0], (tuple, list)):
+            # Some Pillow builds may already yield pixel tuples.
+            pixels = [_pixel_to_rgb(p) for p in flat]
+        else:
+            # Flattened scalar channel data (R, G, B, R, G, B, ...)
+            pixels = [
+                _pixel_to_rgb((flat[i], flat[i + 1], flat[i + 2]))
+                for i in range(0, len(flat), 3)
+                if i + 2 < len(flat)
+            ]
+    else:
+        # Pillow < version that introduced get_flattened_data
+        pixels = [_pixel_to_rgb(p) for p in img.getdata()]
 
     scored = []
     for rgb in pixels:

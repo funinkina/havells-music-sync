@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 
 import tinytuya
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 try:
     np = importlib.import_module("numpy")
@@ -55,7 +55,7 @@ BEAT_UPDATE_INTERVAL_SECONDS = 0.12
 BEAT_MIN_BRIGHTNESS_DELTA = 25
 
 COLOR_TRANSITION_SECONDS = 2
-COLOR_TRANSITION_STEPS = 10
+COLOR_TRANSITION_STEPS = 8
 
 
 def log(level: str, message: str) -> None:
@@ -587,6 +587,7 @@ def _pixel_to_rgb(pixel: object) -> tuple[int, int, int]:
 
 def pick_dominant_rgb(image_data: bytes) -> tuple[int, int, int]:
     img = Image.open(io.BytesIO(image_data)).convert("RGB")
+    img = ImageEnhance.Color(img).enhance(1.75)
 
     # Resize to speed up processing — 100px is plenty
     img = img.resize((100, 100), Image.LANCZOS)
@@ -725,6 +726,14 @@ def transition_bulb_to_album_color(
     start_h = int(current_h)
     start_s = int(current_s)
     start_v = int(current_v)
+
+    if start_h == target_h and start_s == target_s and start_v == target_v:
+        log(
+            "TRANSITION",
+            f"Skipping transition; already at target H={target_h} S={target_s} V={target_v}",
+        )
+        return target_h, target_s, target_v
+
     steps = max(1, int(COLOR_TRANSITION_STEPS))
     step_sleep = max(0.01, float(COLOR_TRANSITION_SECONDS) / steps)
 

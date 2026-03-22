@@ -3,6 +3,7 @@ import colorsys
 import io
 import importlib
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Empty, Queue
 import shutil
@@ -494,6 +495,76 @@ def fallback_poll_worker(stop_event: threading.Event, track_queue: Queue) -> Non
         stop_event.wait(POLL_INTERVAL_SECONDS)
 
 
+def resolve_nowplaying_binary() -> str | None:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    local_nowplaying = os.path.join(script_dir, "nowplaying")
+    if os.path.exists(local_nowplaying) and os.access(local_nowplaying, os.X_OK):
+        return local_nowplaying
+    return shutil.which("nowplaying")
+
+
+def nowplaying_worker(
+    stop_event: threading.Event,
+    track_queue: Queue,
+    nowplaying_bin: str,
+) -> None:
+    while not stop_event.is_set():
+        process: subprocess.Popen[str] | None = None
+        try:
+            process = subprocess.Popen(
+                [nowplaying_bin],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            log(
+                "INFO",
+                f"Started nowplaying binary ({nowplaying_bin}) for event-driven tracking",
+            )
+
+            if process.stdout is None:
+                raise RuntimeError("nowplaying process started without stdout pipe")
+
+            for line in process.stdout:
+                if stop_event.is_set():
+                    break
+
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+
+                track = normalize_track_payload(payload)
+                if track:
+                    track_queue.put(track)
+
+            if stop_event.is_set():
+                break
+
+            rc = process.poll()
+            log("WARN", f"nowplaying exited unexpectedly (code={rc}); restarting")
+        except Exception as exc:
+            if not stop_event.is_set():
+                log("WARN", f"nowplaying worker error: {exc}; retrying")
+        finally:
+            if process is not None:
+                try:
+                    process.terminate()
+                    process.wait(timeout=1.0)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+
+        stop_event.wait(1.0)
+
+
 def download_image(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=10) as response:
         return response.read()
@@ -748,10 +819,22 @@ def main() -> None:
     fallback_thread.start()
 
     last_signature = ""
+    nowplaying_thread = None
     log(
         "INFO",
-        "Waiting for YT Music extension events + Spotify/Music fallback... press Ctrl+C to stop.",
+        "Starting bridge + nowplaying monitor + fallback polling... press Ctrl+C to stop.",
     )
+
+    nowplaying_bin = resolve_nowplaying_binary()
+    if nowplaying_bin:
+        nowplaying_thread = threading.Thread(
+            target=nowplaying_worker,
+            args=(stop_event, track_queue, nowplaying_bin),
+            daemon=True,
+        )
+        nowplaying_thread.start()
+    else:
+        log("WARN", "nowplaying binary not found; relying on bridge + fallback only")
 
     try:
         while True:
@@ -760,68 +843,75 @@ def main() -> None:
             except Empty:
                 continue
 
-            state = str(now_playing.get("state") or "unknown").lower()
-            if state == "paused":
-                log("INFO", "Playback paused")
-                continue
+            try:
+                state = str(now_playing.get("state") or "unknown").lower()
+                if state == "paused":
+                    log("INFO", "Playback paused")
+                    continue
 
-            sig = "|".join(
-                [
-                    now_playing.get("title", ""),
-                    now_playing.get("artist", ""),
-                    now_playing.get("album", ""),
-                ]
-            )
-            if sig == last_signature:
-                continue
-
-            log(
-                "DETECT",
-                f"Detected song: {now_playing['title']} - {now_playing['artist']} [{now_playing['source']}]",
-            )
-
-            artwork_url = now_playing.get("artwork_url", "")
-            if not artwork_url:
-                log(
-                    "SKIP",
-                    f"No artwork URL for {now_playing['title']} - {now_playing['artist']}",
+                sig = "|".join(
+                    [
+                        str(now_playing.get("source", "")),
+                        str(now_playing.get("title", "")),
+                        str(now_playing.get("artist", "")),
+                        str(now_playing.get("album", "")),
+                    ]
                 )
+                if sig == last_signature:
+                    continue
+
+                log(
+                    "DETECT",
+                    f"Detected song: {now_playing['title']} - {now_playing['artist']} [{now_playing['source']}]",
+                )
+
+                artwork_url = now_playing.get("artwork_url", "")
+                if not artwork_url:
+                    log(
+                        "SKIP",
+                        f"No artwork URL for {now_playing['title']} - {now_playing['artist']}",
+                    )
+                    last_signature = sig
+                    continue
+
+                image_data = download_image(artwork_url)
+                rgb = pick_dominant_rgb(image_data)
+                log(
+                    "TRACK",
+                    f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
+                )
+
+                with color_lock:
+                    current_h = color_state.get("h")
+                    current_s = color_state.get("s")
+                    current_v = color_state.get("v")
+
+                new_h, new_s, new_v = transition_bulb_to_album_color(
+                    bulb,
+                    rgb,
+                    int(current_h) if current_h is not None else None,
+                    int(current_s) if current_s is not None else None,
+                    int(current_v) if current_v is not None else None,
+                )
+
+                with color_lock:
+                    color_state["h"] = new_h
+                    color_state["s"] = new_s
+                    color_state["v"] = new_v
+                    color_state["last_brightness"] = new_v
+
                 last_signature = sig
+            except Exception as exc:
+                log("WARN", f"Track handling error: {exc}")
                 continue
-
-            image_data = download_image(artwork_url)
-            rgb = pick_dominant_rgb(image_data)
-            log(
-                "TRACK",
-                f"Applying color for: {now_playing['title']} - {now_playing['artist']} ({now_playing['source']})",
-            )
-
-            with color_lock:
-                current_h = color_state.get("h")
-                current_s = color_state.get("s")
-                current_v = color_state.get("v")
-
-            new_h, new_s, new_v = transition_bulb_to_album_color(
-                bulb,
-                rgb,
-                int(current_h) if current_h is not None else None,
-                int(current_s) if current_s is not None else None,
-                int(current_v) if current_v is not None else None,
-            )
-
-            with color_lock:
-                color_state["h"] = new_h
-                color_state["s"] = new_s
-                color_state["v"] = new_v
-                color_state["last_brightness"] = new_v
-
-            last_signature = sig
     except KeyboardInterrupt:
         log("INFO", "Stopped")
     except Exception as exc:
         log("ERROR", str(exc))
     finally:
         stop_event.set()
+        if nowplaying_thread and nowplaying_thread.is_alive():
+            nowplaying_thread.join(timeout=1.0)
         if beat_thread and beat_thread.is_alive():
             beat_thread.join(timeout=1.0)
         if fallback_thread.is_alive():

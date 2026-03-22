@@ -20,6 +20,7 @@ let MRMediaRemoteRegisterForNowPlayingNotifications = unsafeBitCast(
 )
 
 var lastPrintedKey = ""
+var fetchSeq = 0
 
 func stringFrom(_ dict: [AnyHashable: Any], keys: [String]) -> String {
     for k in keys {
@@ -29,14 +30,17 @@ func stringFrom(_ dict: [AnyHashable: Any], keys: [String]) -> String {
     return ""
 }
 
-func emitIfChanged(title: String, artist: String, album: String) {
+func emitIfChanged(title: String, artist: String, album: String, source: String = "") {
     let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
     let a = artist.trimmingCharacters(in: .whitespacesAndNewlines)
     let b = album.trimmingCharacters(in: .whitespacesAndNewlines)
     let key = "\(t)|\(a)|\(b)"
     if key == lastPrintedKey { return }
     lastPrintedKey = key
-    let out: [String: String] = ["title": t, "artist": a, "album": b]
+    var out: [String: String] = ["title": t, "artist": a, "album": b]
+    if !source.isEmpty {
+        out["source"] = source
+    }
     if let data = try? JSONSerialization.data(withJSONObject: out),
        let str = String(data: data, encoding: .utf8) {
         print(str)
@@ -60,9 +64,9 @@ func handleMusicDistributedUserInfo(_ userInfo: [AnyHashable: Any]?) {
     }
 }
 
-func parseYtMusicTabTitle(_ tabTitle: String) -> (String, String) {
+func parseYtMusicTabTitle(_ tabTitle: String) -> (title: String, artist: String, source: String) {
     var clean = tabTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-    // Chrome tab/window: "Track | YouTube Music – Audio playing - Google Chrome – …"
+    // Chrome tab/window: "Track| YouTube Music – Audio playing - Google Chrome – …"
     if let r = clean.range(of: " | YouTube Music", options: .caseInsensitive) {
         clean = String(clean[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -74,14 +78,14 @@ func parseYtMusicTabTitle(_ tabTitle: String) -> (String, String) {
         if let r = clean.range(of: sep) {
             let left = String(clean[..<r.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
             let right = String(clean[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-            return (left, right)
+            return (left, right, "YouTubeMusicTab")
         }
     }
-    return (clean, "")
+    return (clean, "", "YouTubeMusicTab")
 }
 
 /// Scans Chromium-family browsers + Safari for an open `music.youtube.com` tab (matches `music_album_light_sync.py`).
-func findYtMusicInBrowserTabs() -> (title: String, artist: String)? {
+func findYtMusicInBrowserTabs() -> (title: String, artist: String, source: String)? {
     let script = """
     on findYtMusicInChromium(appName)
         tell application "System Events"
@@ -254,20 +258,10 @@ func findYtMusicInBrowserTabs() -> (title: String, artist: String)? {
     if !line.isEmpty, let hit = parseYtBrowserScanLine(line) {
         return hit
     }
-    return findYtMusicFromFrontmostWindow()
+    return findYtMusicFromFrontmostWindowImpl()
 }
 
-private func parseYtBrowserScanLine(_ line: String) -> (String, String)? {
-    let parts = line.components(separatedBy: "|||")
-    guard parts.count == 3 else { return nil }
-    let tabTitle = parts[1]
-    let parsed = parseYtMusicTabTitle(tabTitle)
-    if parsed.0.isEmpty { return nil }
-    return parsed
-}
-
-/// Standalone / Web App windows often do not expose Chromium `tabs` to AppleScript; front window title still matches YT Music.
-private func findYtMusicFromFrontmostWindow() -> (String, String)? {
+private func findYtMusicFromFrontmostWindowImpl() -> (title: String, artist: String, source: String)? {
     let script = """
     tell application "System Events"
         set frontProc to name of first application process whose frontmost is true
@@ -307,7 +301,58 @@ private func findYtMusicFromFrontmostWindow() -> (String, String)? {
     return parseYtBrowserScanLine(line)
 }
 
-func appleScriptPlaying(app: String) -> (String, String, String)? {
+private func parseYtBrowserScanLine(_ line: String) -> (title: String, artist: String, source: String)? {
+    let parts = line.components(separatedBy: "|||")
+    guard parts.count == 3 else { return nil }
+    let browserName = parts[0]
+    let tabTitle = parts[1]
+    let parsed = parseYtMusicTabTitle(tabTitle)
+    if parsed.title.isEmpty { return nil }
+    return (parsed.title, parsed.artist, "YouTubeMusicTab:\(browserName)")
+}
+
+/// Standalone / Web App windows often do not expose Chromium `tabs` to AppleScript; front window title still matches YT Music.
+private func findYtMusicFromFrontmostWindow() -> (title: String, artist: String, source: String)? {
+    let script = """
+    tell application "System Events"
+        set frontProc to name of first application process whose frontmost is true
+        set wt to ""
+        try
+            tell process frontProc
+                set wt to name of front window
+            end tell
+        end try
+    end tell
+    if wt is not "" then
+        if frontProc is "YouTube Music" then
+            if (count of wt) > 2 then
+                set skipTitle to false
+                ignoring case
+                    if wt is "youtube music" then set skipTitle to true
+                    if wt is "new tab" then set skipTitle to true
+                end ignoring
+                if skipTitle is false then
+                    return frontProc & "|||" & wt & "|||frontWindow"
+                end if
+            end if
+        else
+            if wt contains "YouTube Music" then
+                return frontProc & "|||" & wt & "|||frontWindow"
+            end if
+        end if
+    end if
+    return ""
+    """
+
+    var err: NSDictionary?
+    guard let sc = NSAppleScript(source: script) else { return nil }
+    let r = sc.executeAndReturnError(&err)
+    let line = r.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if line.isEmpty { return nil }
+    return parseYtBrowserScanLine(line)
+}
+
+func appleScriptPlaying(app: String) -> (title: String, artist: String, album: String)? {
     let esc = app.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let src = """
     tell application "\(esc)"
@@ -332,25 +377,17 @@ func appleScriptPlaying(app: String) -> (String, String, String)? {
 
 func refreshAppleScriptSources(trigger: String) {
     if let m = appleScriptPlaying(app: "Music") {
-        emitIfChanged(title: m.0, artist: m.1, album: m.2, source: "appleScriptMusic")
+        emitIfChanged(title: m.title, artist: m.artist, album: m.album, source: "appleScriptMusic")
         return
     }
     if let s = appleScriptPlaying(app: "Spotify") {
-        emitIfChanged(title: s.0, artist: s.1, album: s.2, source: "appleScriptSpotify")
+        emitIfChanged(title: s.title, artist: s.artist, album: s.album, source: "appleScriptSpotify")
         return
     }
     if let yt = findYtMusicInBrowserTabs() {
         emitIfChanged(title: yt.title, artist: yt.artist, album: "", source: yt.source)
         return
     }
-    // #region agent log
-    agentLog(
-        hypothesisId: "verify",
-        location: "nowplaying.swift:refreshAppleScriptSources",
-        message: "AppleScript poll (no track from Music, Spotify, or YT Music tab)",
-        data: ["trigger": trigger]
-    )
-    // #endregion
 }
 
 /// YouTube Music in a browser does not post distributed notifications; poll when native players are idle.
@@ -364,35 +401,10 @@ func refreshYoutubeMusicBrowserOnly(trigger: String) {
 
 func fetchNowPlaying(trigger: String) {
     fetchSeq += 1
-    let seq = fetchSeq
     MRMediaRemoteGetNowPlayingInfo(DispatchQueue.main) { info in
-        let keysSorted = info.keys.map { "\($0)" }.sorted()
-        let keysJoined = keysSorted.joined(separator: ",")
         let titleKey = "kMRMediaRemoteNowPlayingInfoTitle"
         let artistKey = "kMRMediaRemoteNowPlayingInfoArtist"
         let albumKey = "kMRMediaRemoteNowPlayingInfoAlbum"
-        let rawTitle = info[titleKey]
-        let rawArtist = info[artistKey]
-        let rawAlbum = info[albumKey]
-        // #region agent log
-        agentLog(
-            hypothesisId: "H2_H3_H5",
-            location: "nowplaying.swift:callback",
-            message: "MRMediaRemoteGetNowPlayingInfo callback",
-            data: [
-                "trigger": trigger,
-                "fetchSeq": seq,
-                "keyCount": info.count,
-                "keysSample": String(keysJoined.prefix(4000)),
-                "titlePresent": rawTitle != nil,
-                "titleSwiftType": rawTitle.map { String(describing: Swift.type(of: $0)) } ?? "nil",
-                "titleAsStringOk": (rawTitle as? String) != nil,
-                "artistAsStringOk": (rawArtist as? String) != nil,
-                "albumAsStringOk": (rawAlbum as? String) != nil,
-                "keysContainingTitle": keysSorted.filter { $0.contains("Title") || $0.contains("title") }.joined(separator: ";"),
-            ]
-        )
-        // #endregion
         let title  = info[titleKey] as? String ?? ""
         let artist = info[artistKey] as? String ?? ""
         let album  = info[albumKey] as? String ?? ""
@@ -411,18 +423,13 @@ func fetchNowPlaying(trigger: String) {
 }
 
 MRMediaRemoteRegisterForNowPlayingNotifications(DispatchQueue.main)
-// #region agent log
-agentLog(hypothesisId: "H4", location: "nowplaying.swift:after-register", message: "Registered for now playing notifications", data: [:])
-// #endregion
 
 NotificationCenter.default.addObserver(
     forName: NSNotification.Name("kMRMediaRemoteNowPlayingInfoDidChangeNotification"),
     object: nil,
     queue: .main
 ) { _ in
-    // #region agent log
-    agentLog(hypothesisId: "H4", location: "nowplaying.swift:notification", message: "kMRMediaRemoteNowPlayingInfoDidChangeNotification fired", data: [:])
-    // #endregion
+
     fetchNowPlaying(trigger: "notification")
 }
 

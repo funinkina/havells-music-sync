@@ -1,9 +1,9 @@
 {
-    "timestamp": 1774172765.830882,
+    "timestamp": 1774376329.313639,
     "devices": [
         {
-            "id": "d76bde5d392473b313toiy",
-            "ip": "192.168.0.101",
+            "id": "d7f78531ef7e1ea11eyo4a",
+            "ip": "192.168.0.104",
             "uuid": "d9cb25a5469af856",
             "active": 2,
             "encrypt": true,
@@ -12,7 +12,7 @@
             "wf_cfg": true,
             "clientLink": 3,
             "name": "HAVELLS TW+RGB",
-            "key": "tG:LKqa>K^HCJhi?",
+            "key": "l9U&UbYYOxQlELv~",
             "mac": "00:33:7a:8c:a9:42",
             "ability": 0,
             "dev_type": "default",
@@ -21,13 +21,13 @@
             "dps": {
                 "dps": {
                     "20": true,
-                    "21": "white",
+                    "21": "colour",
                     "22": 1000,
-                    "23": 543,
+                    "23": 0,
                     "24": "000003e803e8",
                     "25": "000e0d0000000000000000c80000",
-                    "26": 3900,
-                    "34": false
+                    "26": 0,
+                    "34": true
                 }
             },
             "origin": "broadcast",

@@ -29,9 +29,9 @@ except Exception:
 # ==========================
 # Hardcoded config (edit here)
 # ==========================
-DEVICE_IP = "192.168.0.101"
-DEVICE_ID = "d76bde5d392473b313toiy"
-DEVICE_LOCAL_KEY = "tG:LKqa>K^HCJhi?"
+DEVICE_IP = "192.168.0.104"
+DEVICE_ID = "d7f78531ef7e1ea11eyo4a"
+DEVICE_LOCAL_KEY = "l9U&UbYYOxQlELv~"
 DEVICE_VERSION = 3.5
 
 POLL_INTERVAL_SECONDS = 3

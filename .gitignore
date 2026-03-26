@@ -1,3 +1,7 @@
 __pycache__
 .cursor
 .DS_Store
+.gradle
+build
+mnt
+gradle

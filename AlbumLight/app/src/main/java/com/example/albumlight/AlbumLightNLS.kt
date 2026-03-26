@@ -3,6 +3,7 @@ package com.example.albumlight
 import android.content.Intent
 import android.service.notification.NotificationListenerService
 import android.util.Log
+import androidx.core.content.ContextCompat
 
 /**
  * NotificationListenerService — the Android system binds this service automatically
@@ -37,11 +38,14 @@ class AlbumLightNLS : NotificationListenerService() {
     }
 
     private fun notifyService(action: String) {
+        // Only forward NLS events when the user has explicitly started the service.
+        if (!Prefs(this).serviceEnabled) return
+
         val intent = Intent(this, LightSyncService::class.java).apply {
             this.action = action
         }
         try {
-            startService(intent)
+            ContextCompat.startForegroundService(this, intent)
         } catch (e: Exception) {
             Log.w(TAG, "Could not start LightSyncService: ${e.message}")
         }

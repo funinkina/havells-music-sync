@@ -89,7 +89,9 @@ class LightSyncService : LifecycleService() {
                 stopSelf()
                 return START_NOT_STICKY
             }
-            AlbumLightNLS.ACTION_NLS_CONNECTED -> registerMediaSessions()
+            AlbumLightNLS.ACTION_NLS_CONNECTED -> {
+                if (prefs.serviceEnabled) registerMediaSessions()
+            }
             AlbumLightNLS.ACTION_NLS_DISCONNECTED -> unregisterMediaSessions()
             else -> {
                 // ACTION_START or auto-restart — try to attach if NLS already connected
@@ -301,40 +303,47 @@ class LightSyncService : LifecycleService() {
         targetH: Int, targetS: Int, targetV: Int,
         p: Prefs
     ) {
-        val startH = currentH
-        val startS = currentS
-        val startV = currentV
+        // Open a persistent connection for the entire transition so we don't
+        // re-negotiate TCP + v3.5 session for every intermediate colour step.
+        device.connect()
+        try {
+            val startH = currentH
+            val startS = currentS
+            val startV = currentV
 
-        if (startH == null || startS == null || startV == null) {
-            // No previous state — jump directly
-            device.setColor(targetH, targetS, targetV)
-            Log.d(TAG, "Direct set → H=$targetH S=$targetS V=$targetV")
-        } else {
-            if (startH == targetH && startS == targetS && startV == targetV) {
-                Log.d(TAG, "Already at target colour, skipping transition")
-                return
+            if (startH == null || startS == null || startV == null) {
+                // No previous state — jump directly
+                device.setColor(targetH, targetS, targetV)
+                Log.d(TAG, "Direct set → H=$targetH S=$targetS V=$targetV")
+            } else {
+                if (startH == targetH && startS == targetS && startV == targetV) {
+                    Log.d(TAG, "Already at target colour, skipping transition")
+                    return
+                }
+
+                val steps     = p.colorTransitionSteps.coerceIn(1, 20)
+                val stepDelayMs = ((p.colorTransitionSeconds * 1000f) / steps).toLong().coerceAtLeast(10L)
+
+                Log.d(TAG, "Transition H:$startH→$targetH over ${p.colorTransitionSeconds}s ($steps steps)")
+
+                for (i in 1..steps) {
+                    if (Thread.currentThread().isInterrupted) return
+                    val t = i.toFloat() / steps
+                    val h = ColorExtractor.interpolateHue(startH, targetH, t)
+                    val s = (startS + (targetS - startS) * t).roundToInt()
+                    val v = (startV + (targetV - startV) * t).roundToInt()
+                    device.setColor(h, s, v)
+                    if (i < steps) Thread.sleep(stepDelayMs)
+                }
+                Log.d(TAG, "Transition complete → H=$targetH S=$targetS V=$targetV")
             }
 
-            val steps     = p.colorTransitionSteps.coerceIn(1, 20)
-            val stepDelayMs = ((p.colorTransitionSeconds * 1000f) / steps).toLong().coerceAtLeast(10L)
-
-            Log.d(TAG, "Transition H:$startH→$targetH over ${p.colorTransitionSeconds}s ($steps steps)")
-
-            for (i in 1..steps) {
-                if (Thread.currentThread().isInterrupted) return
-                val t = i.toFloat() / steps
-                val h = ColorExtractor.interpolateHue(startH, targetH, t)
-                val s = (startS + (targetS - startS) * t).roundToInt()
-                val v = (startV + (targetV - startV) * t).roundToInt()
-                device.setColor(h, s, v)
-                if (i < steps) Thread.sleep(stepDelayMs)
-            }
-            Log.d(TAG, "Transition complete → H=$targetH S=$targetS V=$targetV")
+            currentH = targetH
+            currentS = targetS
+            currentV = targetV
+        } finally {
+            device.disconnect()
         }
-
-        currentH = targetH
-        currentS = targetS
-        currentV = targetV
     }
 
     // ── UI broadcast helpers ──────────────────────────────────────────────────

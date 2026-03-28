@@ -29,7 +29,7 @@ except Exception:
 # ==========================
 # Hardcoded config (edit here)
 # ==========================
-DEVICE_IP = "192.168.0.115"
+DEVICE_IP = "192.168.0.100"
 DEVICE_ID = "d7f78531ef7e1ea11eyo4a"
 DEVICE_LOCAL_KEY = "l9U&UbYYOxQlELv~"
 DEVICE_VERSION = 3.5
@@ -426,6 +426,17 @@ def start_track_bridge_server(track_queue: Queue):
         def log_message(self, format, *args):
             return
 
+        def _send_cors_headers(self):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self._send_cors_headers()
+            self.end_headers()
+
         def do_POST(self):
             if self.path != "/track":
                 self.send_response(404)
@@ -442,11 +453,13 @@ def start_track_bridge_server(track_queue: Queue):
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self._send_cors_headers()
                 self.end_headers()
                 self.wfile.write(b'{"ok":true}')
             except Exception as exc:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
+                self._send_cors_headers()
                 self.end_headers()
                 msg = json.dumps({"ok": False, "error": str(exc)})
                 self.wfile.write(msg.encode("utf-8"))

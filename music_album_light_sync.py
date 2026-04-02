@@ -4,6 +4,7 @@ import io
 import importlib
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Empty, Queue
 import shutil
@@ -37,6 +38,8 @@ DEVICE_VERSION = 3.5
 POLL_INTERVAL_SECONDS = 3
 ITUNES_STOREFRONT = "US"
 NOWPLAYING_CLI_BIN = "nowplaying-cli"
+PLAYERCTL_BIN = "playerctl"
+PLAYERCTL_METADATA_FORMAT = "{{status}}|||{{playerName}}|||{{xesam:title}}|||{{xesam:artist}}|||{{xesam:album}}|||{{mpris:artUrl}}"
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 9001
 
@@ -57,6 +60,10 @@ BEAT_MIN_BRIGHTNESS_DELTA = 25
 COLOR_TRANSITION_SECONDS = 1.6
 COLOR_TRANSITION_STEPS = 4
 
+IS_MACOS = sys.platform == "darwin"
+IS_LINUX = sys.platform.startswith("linux")
+_PLAYERCTL_MISSING_LOGGED = False
+
 
 def log(level: str, message: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -64,6 +71,9 @@ def log(level: str, message: str) -> None:
 
 
 def run_applescript(script: str) -> str:
+    if not IS_MACOS:
+        return ""
+
     result = subprocess.run(
         ["osascript", "-e", script],
         capture_output=True,
@@ -194,6 +204,88 @@ def get_system_now_playing() -> dict | None:
     }
 
 
+def _normalize_playback_state(state: str) -> str:
+    text = state.strip().lower()
+    if text in {"playing", "play"}:
+        return "playing"
+    if text in {"paused", "pause", "stopped", "stop"}:
+        return "paused"
+    if "play" in text:
+        return "playing"
+    if "pause" in text or "stop" in text:
+        return "paused"
+    return "unknown"
+
+
+def _parse_playerctl_track_line(line: str) -> dict | None:
+    parts = [part.strip() for part in line.split("|||", 5)]
+    if len(parts) < 6:
+        return None
+
+    raw_state, player_name, title, artist, album, artwork_url = parts
+    if not title:
+        return None
+
+    source = "MPRIS"
+    if player_name:
+        source = f"MPRIS:{player_name}"
+
+    return {
+        "source": source,
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "state": _normalize_playback_state(raw_state),
+        "artwork_url": artwork_url,
+    }
+
+
+def get_linux_playerctl_now_playing() -> dict | None:
+    global _PLAYERCTL_MISSING_LOGGED
+
+    if not IS_LINUX:
+        return None
+
+    if not shutil.which(PLAYERCTL_BIN):
+        if not _PLAYERCTL_MISSING_LOGGED:
+            log(
+                "WARN",
+                f"{PLAYERCTL_BIN} not found; install it to enable Linux now-playing detection. Falling back to bridge events.",
+            )
+            _PLAYERCTL_MISSING_LOGGED = True
+        return None
+
+    raw = run_command(
+        [
+            PLAYERCTL_BIN,
+            "-a",
+            "metadata",
+            "--format",
+            PLAYERCTL_METADATA_FORMAT,
+        ]
+    )
+    if not raw:
+        return None
+
+    tracks = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parsed = _parse_playerctl_track_line(line)
+        if parsed:
+            tracks.append(parsed)
+
+    if not tracks:
+        return None
+
+    for track in tracks:
+        if track.get("state") == "playing":
+            return track
+
+    return tracks[0]
+
+
 def _parse_yt_music_tab_title(tab_title: str) -> tuple[str, str]:
     clean = tab_title.strip()
     if clean.endswith(" - YouTube Music"):
@@ -209,6 +301,9 @@ def _parse_yt_music_tab_title(tab_title: str) -> tuple[str, str]:
 
 
 def get_yt_music_from_browser_tabs() -> dict | None:
+    if not IS_MACOS:
+        return None
+
     script = r"""
 on findYtMusicInChromium(appName)
     tell application "System Events"
@@ -292,6 +387,9 @@ return findYtMusicInSafari()
 
 
 def get_spotify_now_playing() -> dict | None:
+    if not IS_MACOS:
+        return None
+
     script = r"""
 tell application "System Events"
     set spotifyRunning to exists (processes where name is "Spotify")
@@ -329,6 +427,9 @@ end tell
 
 
 def get_music_now_playing() -> dict | None:
+    if not IS_MACOS:
+        return None
+
     script = r"""
 tell application "System Events"
     set musicRunning to exists (processes where name is "Music")
@@ -474,12 +575,18 @@ def start_track_bridge_server(track_queue: Queue):
 
 
 def get_now_playing_fallback() -> dict | None:
-    return (
-        get_system_now_playing()
-        or get_spotify_now_playing()
-        or get_music_now_playing()
-        or get_yt_music_from_browser_tabs()
-    )
+    if IS_MACOS:
+        return (
+            get_system_now_playing()
+            or get_spotify_now_playing()
+            or get_music_now_playing()
+            or get_yt_music_from_browser_tabs()
+        )
+
+    if IS_LINUX:
+        return get_linux_playerctl_now_playing() or get_system_now_playing()
+
+    return get_system_now_playing()
 
 
 def fallback_poll_worker(stop_event: threading.Event, track_queue: Queue) -> None:
@@ -488,6 +595,12 @@ def fallback_poll_worker(stop_event: threading.Event, track_queue: Queue) -> Non
         try:
             track = get_now_playing_fallback()
             if track:
+                state = str(track.get("state") or "playing").lower()
+                if state == "paused":
+                    # Keep last_sig reset so resume of same track can re-trigger.
+                    last_sig = ""
+                    continue
+
                 sig = "|".join(
                     [
                         str(track.get("source", "")),
@@ -497,7 +610,7 @@ def fallback_poll_worker(stop_event: threading.Event, track_queue: Queue) -> Non
                     ]
                 )
                 if sig != last_sig:
-                    track["state"] = "playing"
+                    track.setdefault("state", "playing")
                     track_queue.put(track)
                     last_sig = sig
             else:
@@ -509,6 +622,9 @@ def fallback_poll_worker(stop_event: threading.Event, track_queue: Queue) -> Non
 
 
 def resolve_nowplaying_binary() -> str | None:
+    if not IS_MACOS:
+        return None
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     local_nowplaying = os.path.join(script_dir, "nowplaying")
     if os.path.exists(local_nowplaying) and os.access(local_nowplaying, os.X_OK):
@@ -860,6 +976,27 @@ def main() -> None:
         "INFO",
         "Starting bridge + nowplaying monitor + fallback polling... press Ctrl+C to stop.",
     )
+    if IS_MACOS:
+        log(
+            "INFO",
+            "Platform: macOS (MediaRemote/AppleScript + bridge fallback)",
+        )
+    elif IS_LINUX:
+        if shutil.which(PLAYERCTL_BIN):
+            log(
+                "INFO",
+                f"Platform: Linux ({PLAYERCTL_BIN}/MPRIS + bridge fallback)",
+            )
+        else:
+            log(
+                "WARN",
+                f"Platform: Linux ({PLAYERCTL_BIN} missing; bridge fallback only)",
+            )
+    else:
+        log(
+            "WARN",
+            "Platform: unsupported OS-specific media backend; using generic fallback only",
+        )
 
     nowplaying_bin = resolve_nowplaying_binary()
     if nowplaying_bin:
@@ -870,7 +1007,12 @@ def main() -> None:
         )
         nowplaying_thread.start()
     else:
-        log("WARN", "nowplaying binary not found; relying on bridge + fallback only")
+        if IS_MACOS:
+            log(
+                "WARN", "nowplaying binary not found; relying on bridge + fallback only"
+            )
+        else:
+            log("INFO", "macOS nowplaying helper disabled on this platform")
 
     try:
         while True:
